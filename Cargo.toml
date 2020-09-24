@@ -1,6 +1,6 @@
 [package]
-name = "rpld"
-version = "0.1.0"
+name = "sdd"
+version = "0.0.1"
 authors = ["Lukas Vilim <lukas.vilim@gmail.com>"]
 edition = "2018"
 
@@ -8,3 +8,7 @@ edition = "2018"
 
 [dependencies]
 structopt = "0.3.8"
+
+[dependencies.rusqlite]
+version = "0.24.0"
+features = ["bundled"]
