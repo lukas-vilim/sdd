@@ -57,27 +57,38 @@ pub mod dae {
 	}
 
 	impl Field {
-		fn sql_from_raw(
+		fn sql_from_raw<R: Read>(
 			&mut self,
-			raw: &[u8],
-		) -> (&dyn rusqlite::ToSql, usize) {
+			reader: &mut BufReader<R>,
+		) -> Result<&dyn rusqlite::ToSql, std::io::Error> {
 			match &mut self.data_type {
 				FieldType::Int(data) => {
-					*data = u32::from_le_bytes(raw[0..4].try_into().unwrap());
-					(data, 4)
+					let mut bytes = [0; 4];
+					reader.read_exact(&mut bytes)?;
+
+					*data = u32::from_le_bytes(bytes);
+					Ok(data)
 				}
 				FieldType::Float(data) => {
-					*data = f32::from_le_bytes(raw[0..4].try_into().unwrap())
-						.into();
-					(data, 4)
+					let mut bytes = [0; 4];
+					reader.read_exact(&mut bytes)?;
+
+					*data = f32::from_le_bytes(bytes).into();
+					Ok(data)
 				}
 				FieldType::Bool(data) => {
-					*data = raw[0] > 0;
-					(data, 1)
+					let mut bytes = [0; 1];
+					reader.read_exact(&mut bytes)?;
+
+					*data = bytes[0] > 0;
+					Ok(data)
 				}
 				FieldType::Str(data) => {
-					*data = u32::from_le_bytes(raw[0..4].try_into().unwrap());
-					(data, 4)
+					let mut bytes = [0; 4];
+					reader.read_exact(&mut bytes)?;
+
+					*data = u32::from_le_bytes(bytes);
+					Ok(data)
 				}
 			}
 		}
@@ -203,50 +214,50 @@ pub mod dae {
 	}
 
 	impl Daemon {
-		fn read_descriptor(
-			buf: &[u8],
-		) -> Result<(EntryDescriptor, u32, usize), ParsingError> {
-			// Read type 1B, id 4B, dependency 1B and num fields 1B.
-			if buf.len() < 5 {
-				return Result::Err(ParsingError::Space);
-			};
+		fn read_descriptor<R: Read>(
+			reader: &mut BufReader<R>,
+		) -> Result<(EntryDescriptor, u32), std::io::Error> {
+			let mut msg_id_bytes = [0; 4];
+			let mut msg_num_fields_bytes = [0; 1];
+			reader.read_exact(&mut msg_id_bytes)?;
+			reader.read_exact(&mut msg_num_fields_bytes)?;
 
-			let msg_id = u32::from_le_bytes(buf[0..4].try_into().unwrap());
-			let msg_num_fields = buf[4];
+			let msg_id = u32::from_le_bytes(msg_id_bytes);
+			let msg_num_fields = msg_num_fields_bytes[0] as usize;
 
 			let mut desc = EntryDescriptor::make();
-			desc.num_fields = msg_num_fields;
-
-			let expected_size: usize = 5 + msg_num_fields as usize * 5;
-			if buf.len() < expected_size {
-				return Result::Err(ParsingError::Space);
-			}
+			desc.num_fields = msg_num_fields_bytes[0];
 
 			for i in 0..msg_num_fields {
-				let byte_idx: usize = 5 + i as usize * (1 + 4);
-				let data_type = FieldType::from(buf[byte_idx]);
-				let name = u32::from_le_bytes(
-					buf[byte_idx + 1..byte_idx + 5].try_into().unwrap(),
-				);
+				let mut data_type_bytes = [0; 1];
+				let mut name_bytes = [0; 4];
+
+				reader.read_exact(&mut data_type_bytes)?;
+				reader.read_exact(&mut name_bytes)?;
+
+				let data_type = FieldType::from(data_type_bytes[0]);
+				let name = u32::from_le_bytes(name_bytes);
 				let field = Field { data_type, name };
 
 				desc.fields[i as usize] = Option::Some(field);
 			}
 
-			Result::Ok((desc, msg_id, expected_size))
+			Result::Ok((desc, msg_id))
 		}
 
-		fn find_descriptor<'a, 'b>(
-			buf: &'a [u8],
+		fn find_descriptor<'a, 'b, R: Read>(
+			reader: &'a mut BufReader<R>,
 			register: &'b mut Vec<EntryDescriptor>,
 		) -> Result<(&'b mut EntryDescriptor, usize), ParsingError> {
-			if buf.len() < 4 {
-				return Result::Err(ParsingError::Space);
-			}
+			let mut uid_bytes = [0; 4];
+			match reader.read_exact(&mut uid_bytes) {
+				Ok(_) => {}
+				Err(_) => return Err(ParsingError::Space),
+			};
 
-			let uid = u32::from_le_bytes(buf[0..4].try_into().unwrap());
+			let uid = u32::from_le_bytes(uid_bytes);
 			if register.len() < uid as usize {
-				return Result::Err(ParsingError::Fatal(
+				return Err(ParsingError::Fatal(
 					"Uid not found among the descriptors",
 				));
 			}
@@ -270,11 +281,7 @@ pub mod dae {
 		pub fn run(&mut self, addr: &String) -> Result<(), &'static str> {
 			let mut stream = TcpStream::connect(addr)
 				.expect("Could not connect to the address.");
-
-			// let mut reader = BufReader::new(stream);
-			let mut buf: [u8; 256] = [0; 256];
-			let mut buf_ptr: usize = 0;
-			let mut buf_len: usize = 0;
+			let mut reader = BufReader::new(stream);
 
 			enum State {
 				HeaderParsing,
@@ -285,138 +292,122 @@ pub mod dae {
 
 			let mut state = State::HeaderParsing;
 
-			// Read protocol messages.
+			// Read protocol messages until shutdown.
 			loop {
-				// Shift the rest of the buffer back to the begining.
-				if buf_ptr > 0 && buf_len > 0 {
-					let mut ptr = 0;
-					for n in buf_ptr..buf_len {
-						buf[ptr] = buf[n];
-						ptr = ptr + 1;
-					}
-				}
-
-				match stream.read(&mut buf[buf_ptr..256]) {
-					Ok(size) => {
-						buf_len = size + buf_ptr;
-					}
-					Err(_e) => {
-						print!("{}", _e);
-						break;
-					}
-				};
-
-				// Loop until theres not enough data in the buffer.
-				loop {
-					state = match state {
-						State::HeaderParsing => {
-							if buf_len - buf_ptr < 5 {
-								break;
-							}
-
-							let mut proto_bytes: [u8; 4] = [0; 4];
-							proto_bytes
-								.copy_from_slice(&buf[buf_ptr..buf_ptr + 4]);
-
-							let proto = u32::from_le_bytes(proto_bytes);
-							if proto != PROTOCOL {
-								buf_ptr += 4;
+				state = match state {
+					State::HeaderParsing => {
+						let mut proto_bytes: [u8; 4] = [0; 4];
+						match reader.read_exact(&mut proto_bytes) {
+							Ok(_) => {}
+							Err(_) => {
 								continue;
 							}
+						};
 
-							let new_state =
-								match buf[buf_ptr + 4].try_into().unwrap() {
-									MsgType::Desc => State::DescParsing,
-									MsgType::Entry => State::EntryParsing,
-									MsgType::Str => State::StringParsing,
-									MsgType::Invalid => State::HeaderParsing,
-								};
-
-							buf_ptr += 5;
-							new_state
+						match u32::from_le_bytes(proto_bytes) {
+							PROTOCOL => {}
+							_ => continue,
 						}
-						State::DescParsing => {
-							let (mut desc, uid, read) =
-								match Daemon::read_descriptor(
-									&buf[buf_ptr..buf_len],
-								) {
-									Ok((desc, uid, read)) => (desc, uid, read),
-									Err(ParsingError::Space) => {
-										break;
-									}
-									Err(ParsingError::Fatal(msg)) => {
-										return Result::Err(msg);
-									}
-								};
 
-							buf_ptr += read;
-
-							desc.compile(&self.proto.strings);
-
-							let create_cmd =
-								desc.make_create_cmd(&self.proto.strings);
-
-							Daemon::register_descriptor(
-								desc,
-								uid,
-								&mut self.proto.descriptors,
-							)?;
-
-							self.proto
-								.con
-								.execute(&create_cmd, rusqlite::NO_PARAMS)
-								.expect("SQL creation query failed");
-
-							State::HeaderParsing
+						let mut type_bytes: [u8; 1] = [0];
+						match reader.read_exact(&mut type_bytes) {
+							Ok(_) => {}
+							Err(_) => {
+								continue;
+							}
 						}
-						State::EntryParsing => {
-							let (desc, read) = match Daemon::find_descriptor(
-								&buf[buf_ptr..buf_len],
-								&mut self.proto.descriptors,
-							) {
-								Ok((desc, read)) => (desc, read),
-								Err(ParsingError::Space) => {
+
+						let new_state = match type_bytes[0].try_into().unwrap()
+						{
+							MsgType::Desc => State::DescParsing,
+							MsgType::Entry => State::EntryParsing,
+							MsgType::Str => State::StringParsing,
+							MsgType::Invalid => State::HeaderParsing,
+						};
+
+						new_state
+					}
+					State::DescParsing => {
+						let (mut desc, uid) =
+							match Daemon::read_descriptor(&mut reader) {
+								Ok((desc, uid)) => (desc, uid),
+								Err(e) => {
+									println!("Failure during read_descriptor!");
+									println!("{}", e);
+
 									break;
-								}
-								Err(ParsingError::Fatal(msg)) => {
-									return Result::Err(msg);
 								}
 							};
 
-							buf_ptr += read;
+						desc.compile(&self.proto.strings);
 
-							let mut params =
-								Vec::<&dyn rusqlite::ToSql>::with_capacity(
-									desc.num_fields as usize,
-								);
+						let create_cmd =
+							desc.make_create_cmd(&self.proto.strings);
 
-							for field in &mut desc.fields {
-								match field {
-									Some(val) => {
-										let (to_sql, size) = val.sql_from_raw(
-											&buf[buf_ptr..buf_len],
-										);
+						Daemon::register_descriptor(
+							desc,
+							uid,
+							&mut self.proto.descriptors,
+						)?;
 
-										params.push(to_sql);
-										buf_ptr += size;
-									}
-									_ => {
-										break;
-									}
+						self.proto
+							.con
+							.execute(&create_cmd, rusqlite::NO_PARAMS)
+							.expect("SQL creation query failed");
+
+						State::HeaderParsing
+					}
+					State::EntryParsing => {
+						let (desc, read) = match Daemon::find_descriptor(
+							&mut reader,
+							&mut self.proto.descriptors,
+						) {
+							Ok((desc, read)) => (desc, read),
+							Err(ParsingError::Space) => {
+								break;
+							}
+							Err(ParsingError::Fatal(msg)) => {
+								return Result::Err(msg);
+							}
+						};
+
+						let mut params =
+							Vec::<&dyn rusqlite::ToSql>::with_capacity(
+								desc.num_fields as usize,
+							);
+
+						for field in &mut desc.fields {
+							match field {
+								Some(val) => {
+									let to_sql =
+										match val.sql_from_raw(&mut reader) {
+											Ok(val) => val,
+											Err(e) => {
+												println!("Error during the sql_from_raw!");
+												println!("{}", e);
+
+												continue;
+											}
+										};
+
+									params.push(to_sql);
+								}
+								_ => {
+									break;
 								}
 							}
-
-							let con = &self.proto.con;
-							let cmd = &desc.sql_cmd;
-
-							con.execute(cmd, params).expect("SQL Query failed");
-
-							State::HeaderParsing
 						}
-						State::StringParsing => {
-							// TODO:
-							State::HeaderParsing
-						}
+
+						let con = &self.proto.con;
+						let cmd = &desc.sql_cmd;
+
+						con.execute(cmd, params).expect("SQL Query failed");
+
+						State::HeaderParsing
+					}
+					State::StringParsing => {
+						// TODO:
+						State::HeaderParsing
 					}
 				}
 			}
