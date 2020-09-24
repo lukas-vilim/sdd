@@ -1,9 +1,6 @@
 :compiler rustc
-call BuildToolsClear()
-call BuildToolsAdd(':! cargo run')
-call BuildToolsAdd(':! cargo build')
-call BuildToolsAdd(':Dispatch cargo run')
-call BuildToolsAdd(':! cargo run -- -a "127.0.0.1:2001" -o "out.txt"')
+
+ :BuildToolsAdd 'make', {'makeprg': ':make', 'errorformat': '
 
 aug rust
 	au!
