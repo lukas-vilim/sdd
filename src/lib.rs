@@ -406,7 +406,40 @@ pub mod dae {
 						State::HeaderParsing
 					}
 					State::StringParsing => {
-						// TODO:
+						let mut uid_bytes = [0;4];
+						match reader.read_exact(&mut uid_bytes) {
+							Ok(_) => {}
+							Err(_) => { continue; }
+						};
+
+						let uid = u32::from_le_bytes(uid_bytes);
+						if uid as usize != self.proto.strings.len() {
+							// error string ids broken.
+							println!("String uid does not match!");
+							continue;
+						}
+
+						let mut size_bytes = [0;4];
+						match reader.read_exact(&mut size_bytes) {
+							Ok(_) => {}
+							Err(_) => { continue; }
+						};
+
+						let size = u32::from_le_bytes(size_bytes);
+						let mut string_bytes = Vec::<u8>::with_capacity(size as usize);
+						match reader.read_exact(&mut string_bytes[..])
+						{
+							Ok(_) => {}
+							Err(_) => { continue; }
+						};
+
+						let string = match String::from_utf8(string_bytes) {
+							Ok(s) => s,
+							Err(e) => { println!("{}", e); continue; }
+						};
+
+						self.proto.strings.push(string);
+
 						State::HeaderParsing
 					}
 				}
