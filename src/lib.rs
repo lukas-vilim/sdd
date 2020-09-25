@@ -173,7 +173,7 @@ pub mod dae {
 		pub fn new(db_path: String) -> Result<Protocol, &'static str> {
 			let connection = match rusqlite::Connection::open(db_path) {
 				Ok(c) => c,
-				Err(e) => return Result::Err("Connection error"),
+				Err(_) => return Result::Err("Connection error"),
 			};
 
 			let proto = Protocol {
@@ -248,7 +248,7 @@ pub mod dae {
 		fn find_descriptor<'a, 'b, R: Read>(
 			reader: &'a mut BufReader<R>,
 			register: &'b mut Vec<EntryDescriptor>,
-		) -> Result<(&'b mut EntryDescriptor, usize), ParsingError> {
+		) -> Result<&'b mut EntryDescriptor, ParsingError> {
 			let mut uid_bytes = [0; 4];
 			match reader.read_exact(&mut uid_bytes) {
 				Ok(_) => {}
@@ -262,7 +262,7 @@ pub mod dae {
 				));
 			}
 
-			Result::Ok((&mut register[uid as usize], 4))
+			Result::Ok(&mut register[uid as usize])
 		}
 
 		fn register_descriptor<'a>(
@@ -279,7 +279,7 @@ pub mod dae {
 		}
 
 		pub fn run(&mut self, addr: &String) -> Result<(), &'static str> {
-			let mut stream = TcpStream::connect(addr)
+			let stream = TcpStream::connect(addr)
 				.expect("Could not connect to the address.");
 			let mut reader = BufReader::new(stream);
 
@@ -358,11 +358,11 @@ pub mod dae {
 						State::HeaderParsing
 					}
 					State::EntryParsing => {
-						let (desc, read) = match Daemon::find_descriptor(
+						let desc = match Daemon::find_descriptor(
 							&mut reader,
 							&mut self.proto.descriptors,
 						) {
-							Ok((desc, read)) => (desc, read),
+							Ok(desc) => desc,
 							Err(ParsingError::Space) => {
 								break;
 							}
