@@ -328,88 +328,89 @@ pub mod dae {
 						new_state
 					}
 					State::DescParsing => {
-						let (mut desc, uid) =
-							match Daemon::read_descriptor(&mut reader) {
-								Ok((desc, uid)) => (desc, uid),
-								Err(e) => {
-									println!("Failure during read_descriptor!");
-									println!("{}", e);
+						match Daemon::read_descriptor(&mut reader) {
+							Ok((mut desc, uid)) => {
+								desc.compile(&self.proto.strings);
 
-									break;
-								}
-							};
+								let create_cmd =
+									desc.make_create_cmd(&self.proto.strings);
 
-						desc.compile(&self.proto.strings);
+								Daemon::register_descriptor(
+									desc,
+									uid,
+									&mut self.proto.descriptors,
+								)?;
 
-						let create_cmd =
-							desc.make_create_cmd(&self.proto.strings);
-
-						Daemon::register_descriptor(
-							desc,
-							uid,
-							&mut self.proto.descriptors,
-						)?;
-
-						self.proto
-							.con
-							.execute(&create_cmd, rusqlite::NO_PARAMS)
-							.expect("SQL creation query failed");
+								self.proto
+									.con
+									.execute(&create_cmd, rusqlite::NO_PARAMS)
+									.expect("SQL creation query failed");
+							},
+							Err(e) => {
+								println!("Failure during read_descriptor!");
+								println!("{}", e);
+							}
+						};
 
 						State::HeaderParsing
 					}
 					State::EntryParsing => {
-						let desc = match Daemon::find_descriptor(
+						match Daemon::find_descriptor(
 							&mut reader,
 							&mut self.proto.descriptors,
 						) {
-							Ok(desc) => desc,
+							Ok(desc) => {
+								let mut params =
+									Vec::<&dyn rusqlite::ToSql>::with_capacity(
+										desc.num_fields as usize,
+									);
+
+								let mut failed = false;
+								for field in &mut desc.fields {
+									match field {
+										Some(val) => {
+											let to_sql =
+												match val.sql_from_raw(&mut reader) {
+													Ok(val) => val,
+													Err(e) => {
+														println!("Error during the sql_from_raw!");
+														println!("{}", e);
+
+														failed = true;
+														break;
+													}
+												};
+
+											params.push(to_sql);
+										}
+										_ => {
+											break;
+										}
+									}
+								}
+
+								if !failed {
+									let con = &self.proto.con;
+									let cmd = &desc.sql_cmd;
+
+									con.execute(cmd, params).expect("SQL Query failed");
+								}	
+							},
 							Err(ParsingError::Space) => {
-								break;
+								println!("Not enough data in the buffer");
 							}
 							Err(ParsingError::Fatal(msg)) => {
 								return Result::Err(msg);
 							}
 						};
 
-						let mut params =
-							Vec::<&dyn rusqlite::ToSql>::with_capacity(
-								desc.num_fields as usize,
-							);
-
-						for field in &mut desc.fields {
-							match field {
-								Some(val) => {
-									let to_sql =
-										match val.sql_from_raw(&mut reader) {
-											Ok(val) => val,
-											Err(e) => {
-												println!("Error during the sql_from_raw!");
-												println!("{}", e);
-
-												continue;
-											}
-										};
-
-									params.push(to_sql);
-								}
-								_ => {
-									break;
-								}
-							}
-						}
-
-						let con = &self.proto.con;
-						let cmd = &desc.sql_cmd;
-
-						con.execute(cmd, params).expect("SQL Query failed");
-
 						State::HeaderParsing
 					}
 					State::StringParsing => {
 						let mut uid_bytes = [0;4];
-						match reader.read_exact(&mut uid_bytes) {
-							Ok(_) => {}
-							Err(_) => { continue; }
+						if reader.read_exact(&mut uid_bytes).is_err() {
+							state = State::HeaderParsing;
+							continue;
 						};
 
 						let uid = u32::from_le_bytes(uid_bytes);
@@ -420,22 +421,24 @@ pub mod dae {
 						}
 
 						let mut size_bytes = [0;4];
-						match reader.read_exact(&mut size_bytes) {
-							Ok(_) => {}
-							Err(_) => { continue; }
+						if reader.read_exact(&mut size_bytes).is_err() {
+							state = State::HeaderParsing;
+							continue;
 						};
 
 						let size = u32::from_le_bytes(size_bytes);
 						let mut string_bytes = Vec::<u8>::with_capacity(size as usize);
-						match reader.read_exact(&mut string_bytes[..])
-						{
-							Ok(_) => {}
-							Err(_) => { continue; }
+						if reader.read_exact(&mut string_bytes[..]).is_err() {
+							state = State::HeaderParsing;
+							continue;
 						};
 
 						let string = match String::from_utf8(string_bytes) {
 							Ok(s) => s,
-							Err(e) => { println!("{}", e); continue; }
+							Err(e) => { 
+								println!("{}", e); 
+								continue; 
+							}
 						};
 
 						self.proto.strings.push(string);
@@ -444,8 +447,6 @@ pub mod dae {
 					}
 				}
 			}
-
-			Result::Ok(())
 		}
 	}
 
