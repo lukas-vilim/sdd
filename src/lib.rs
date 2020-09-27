@@ -218,15 +218,19 @@ pub mod dae {
 			reader: &mut BufReader<R>,
 		) -> Result<(EntryDescriptor, u32), std::io::Error> {
 			let mut msg_id_bytes = [0; 4];
+			let mut msg_name_bytes = [0;4];
 			let mut msg_num_fields_bytes = [0; 1];
 			reader.read_exact(&mut msg_id_bytes)?;
+			reader.read_exact(&mut msg_name_bytes)?;
 			reader.read_exact(&mut msg_num_fields_bytes)?;
 
 			let msg_id = u32::from_le_bytes(msg_id_bytes);
+			let msg_name = u32::from_le_bytes(msg_name_bytes);
 			let msg_num_fields = msg_num_fields_bytes[0] as usize;
 
 			let mut desc = EntryDescriptor::make();
 			desc.num_fields = msg_num_fields_bytes[0];
+			desc.name = msg_name;
 
 			for i in 0..msg_num_fields {
 				let mut data_type_bytes = [0; 1];
