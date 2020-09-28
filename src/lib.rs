@@ -1,11 +1,12 @@
 pub mod dae {
 	use rusqlite;
-	use std::fs;
 	use std::convert::TryInto;
+	use std::fmt::Write;
+	use std::fs;
 	use std::io::BufReader;
 	use std::io::Read;
-	use std::fmt::Write;
 	use std::net::TcpStream;
+	use std::{thread, time};
 
 	const PROTOCOL: u32 = 0xFEEDBEEF;
 
@@ -42,7 +43,10 @@ pub mod dae {
 				2 => FieldType::Float(0.0),
 				3 => FieldType::Bool(false),
 				4 => FieldType::Str(0),
-				v => { println!("{}", v); panic!(); },
+				v => {
+					println!("{}", v);
+					panic!();
+				}
 			}
 		}
 	}
@@ -229,7 +233,7 @@ pub mod dae {
 			reader: &mut BufReader<R>,
 		) -> Result<(EntryDescriptor, u32), std::io::Error> {
 			let mut msg_id_bytes = [0; 4];
-			let mut msg_name_bytes = [0;4];
+			let mut msg_name_bytes = [0; 4];
 			let mut msg_num_fields_bytes = [0; 1];
 			reader.read_exact(&mut msg_id_bytes)?;
 			reader.read_exact(&mut msg_name_bytes)?;
@@ -314,28 +318,18 @@ pub mod dae {
 				state = match state {
 					State::HeaderParsing => {
 						let mut proto_bytes: [u8; 4] = [0; 4];
-						match reader.read_exact(&mut proto_bytes) {
-							Ok(_) => {}
-							Err(_) => {
-								continue;
-							}
+						let mut type_bytes: [u8; 1] = [0];
+
+						if reader.read_exact(&mut proto_bytes).is_err()
+							|| reader.read_exact(&mut type_bytes).is_err()
+						{
+							thread::sleep(time::Duration::from_millis(50));
+							continue;
 						};
 
-						match u32::from_le_bytes(proto_bytes) {
-							PROTOCOL => {}
-							_ => { 
-								println!("header fail");
-								continue;
-							}
-						}
-
-						let mut type_bytes: [u8; 1] = [0];
-						match reader.read_exact(&mut type_bytes) {
-							Ok(_) => {}
-							Err(_) => {
-								println!("header fail");
-								continue;
-							}
+						if u32::from_le_bytes(proto_bytes) != PROTOCOL {
+							println!("Error: not a protocol header.");
+							continue;
 						}
 
 						let new_state = match type_bytes[0].try_into().unwrap()
@@ -366,7 +360,7 @@ pub mod dae {
 									.con
 									.execute(&create_cmd, rusqlite::NO_PARAMS)
 									.expect("SQL creation query failed");
-							},
+							}
 							Err(e) => {
 								println!("Failure during read_descriptor!");
 								println!("{}", e);
@@ -390,17 +384,18 @@ pub mod dae {
 								for field in &mut desc.fields {
 									match field {
 										Some(val) => {
-											let to_sql =
-												match val.sql_from_raw(&mut reader) {
-													Ok(val) => val,
-													Err(e) => {
-														println!("Error during the sql_from_raw!");
-														println!("{}", e);
+											let to_sql = match val
+												.sql_from_raw(&mut reader)
+											{
+												Ok(val) => val,
+												Err(e) => {
+													println!("Error during the sql_from_raw!");
+													println!("{}", e);
 
-														failed = true;
-														break;
-													}
-												};
+													failed = true;
+													break;
+												}
+											};
 
 											params.push(to_sql);
 										}
@@ -414,9 +409,10 @@ pub mod dae {
 									let con = &self.proto.con;
 									let cmd = &desc.sql_cmd;
 
-									con.execute(cmd, params).expect("SQL Query failed");
-								}	
-							},
+									con.execute(cmd, params)
+										.expect("SQL Query failed");
+								}
+							}
 							Err(ParsingError::Space) => {
 								println!("Not enough data in the buffer");
 							}
@@ -428,7 +424,7 @@ pub mod dae {
 						State::HeaderParsing
 					}
 					State::StringParsing => {
-						let mut uid_bytes = [0;4];
+						let mut uid_bytes = [0; 4];
 						if reader.read_exact(&mut uid_bytes).is_err() {
 							println!("reading uid failed");
 							state = State::HeaderParsing;
@@ -443,7 +439,7 @@ pub mod dae {
 							continue;
 						}
 
-						let mut size_bytes = [0;4];
+						let mut size_bytes = [0; 4];
 						if reader.read_exact(&mut size_bytes).is_err() {
 							println!("reading string size failed");
 							state = State::HeaderParsing;
@@ -451,8 +447,11 @@ pub mod dae {
 						};
 
 						let size = u32::from_le_bytes(size_bytes) as usize;
-						let mut string_bytes = vec![0;size];
-						if reader.read_exact(&mut string_bytes[0..size]).is_err() {
+						let mut string_bytes = vec![0; size];
+						if reader
+							.read_exact(&mut string_bytes[0..size])
+							.is_err()
+						{
 							println!("failed reading string");
 							state = State::HeaderParsing;
 							continue;
@@ -460,10 +459,10 @@ pub mod dae {
 
 						let string = match String::from_utf8(string_bytes) {
 							Ok(s) => s,
-							Err(e) => { 
-								println!("{}", e); 
+							Err(e) => {
+								println!("{}", e);
 								state = State::HeaderParsing;
-								continue; 
+								continue;
 							}
 						};
 
