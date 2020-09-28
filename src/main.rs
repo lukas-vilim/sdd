@@ -24,7 +24,7 @@ fn main() {
 
 	let mut daemon = dae::Daemon { proto: protocol };
 
-	match daemon.run(&String::from("127.0.0.1:2001")) {
+	match daemon.start(&String::from("127.0.0.1:2001")) {
 		Ok(()) => {}
 		Err(e) => {
 			println!("{}", e);
