@@ -1,8 +1,10 @@
 pub mod dae {
 	use rusqlite;
+	use std::fs;
 	use std::convert::TryInto;
 	use std::io::BufReader;
 	use std::io::Read;
+	use std::fmt::Write;
 	use std::net::TcpStream;
 
 	const PROTOCOL: u32 = 0xFEEDBEEF;
@@ -40,7 +42,7 @@ pub mod dae {
 				2 => FieldType::Float(0.0),
 				3 => FieldType::Bool(false),
 				4 => FieldType::Str(0),
-				_ => panic!(),
+				v => { println!("{}", v); panic!(); },
 			}
 		}
 	}
@@ -122,8 +124,6 @@ pub mod dae {
 
 				let name = &strings.get(field.name as usize).unwrap();
 				self.sql_cmd.push_str(name);
-				self.sql_cmd.push_str(" ");
-				self.sql_cmd.push_str(&field.data_type.to_string());
 
 				if i < self.num_fields as usize - 1 {
 					self.sql_cmd.push_str(", ");
@@ -131,6 +131,13 @@ pub mod dae {
 					self.sql_cmd.push_str(")");
 				}
 			}
+
+			self.sql_cmd.push_str(" VALUES (");
+			for i in 1..(self.num_fields as usize) {
+				write!(&mut self.sql_cmd, "?{}, ", i).unwrap();
+			}
+
+			write!(&mut self.sql_cmd, "?{})", self.num_fields).unwrap();
 		}
 
 		pub fn make_create_cmd(&self, strings: &Vec<String>) -> String {
@@ -171,6 +178,10 @@ pub mod dae {
 
 	impl Protocol {
 		pub fn new(db_path: String) -> Result<Protocol, &'static str> {
+			match fs::remove_file(&db_path) {
+				_ => {}
+			};
+
 			let connection = match rusqlite::Connection::open(db_path) {
 				Ok(c) => c,
 				Err(_) => return Result::Err("Connection error"),
@@ -201,9 +212,9 @@ pub mod dae {
 	impl From<u8> for MsgType {
 		fn from(t: u8) -> Self {
 			match t {
-				1 => MsgType::Desc,
+				1 => MsgType::Str,
 				2 => MsgType::Entry,
-				3 => MsgType::Str,
+				3 => MsgType::Desc,
 				_ => MsgType::Invalid,
 			}
 		}
@@ -283,6 +294,8 @@ pub mod dae {
 		}
 
 		pub fn run(&mut self, addr: &String) -> Result<(), &'static str> {
+			println!("Starting the daemon");
+
 			let stream = TcpStream::connect(addr)
 				.expect("Could not connect to the address.");
 			let mut reader = BufReader::new(stream);
@@ -310,13 +323,17 @@ pub mod dae {
 
 						match u32::from_le_bytes(proto_bytes) {
 							PROTOCOL => {}
-							_ => continue,
+							_ => { 
+								println!("header fail");
+								continue;
+							}
 						}
 
 						let mut type_bytes: [u8; 1] = [0];
 						match reader.read_exact(&mut type_bytes) {
 							Ok(_) => {}
 							Err(_) => {
+								println!("header fail");
 								continue;
 							}
 						}
@@ -413,6 +430,7 @@ pub mod dae {
 					State::StringParsing => {
 						let mut uid_bytes = [0;4];
 						if reader.read_exact(&mut uid_bytes).is_err() {
+							println!("reading uid failed");
 							state = State::HeaderParsing;
 							continue;
 						};
@@ -420,19 +438,22 @@ pub mod dae {
 						let uid = u32::from_le_bytes(uid_bytes);
 						if uid as usize != self.proto.strings.len() {
 							// error string ids broken.
-							println!("String uid does not match!");
+							println!("{} String uid does not match!", uid);
+							state = State::HeaderParsing;
 							continue;
 						}
 
 						let mut size_bytes = [0;4];
 						if reader.read_exact(&mut size_bytes).is_err() {
+							println!("reading string size failed");
 							state = State::HeaderParsing;
 							continue;
 						};
 
-						let size = u32::from_le_bytes(size_bytes);
-						let mut string_bytes = Vec::<u8>::with_capacity(size as usize);
-						if reader.read_exact(&mut string_bytes[..]).is_err() {
+						let size = u32::from_le_bytes(size_bytes) as usize;
+						let mut string_bytes = vec![0;size];
+						if reader.read_exact(&mut string_bytes[0..size]).is_err() {
+							println!("failed reading string");
 							state = State::HeaderParsing;
 							continue;
 						};
@@ -441,6 +462,7 @@ pub mod dae {
 							Ok(s) => s,
 							Err(e) => { 
 								println!("{}", e); 
+								state = State::HeaderParsing;
 								continue; 
 							}
 						};
